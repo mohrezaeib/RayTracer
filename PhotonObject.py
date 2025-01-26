@@ -1,13 +1,27 @@
+import copy as cp
 import numpy as np
 import RTUtils as RTU
-import copy as cp
 import scipy.special as special
 import MonteCarloFRET as MCF
 
-class Photon():
-    #REFACTOR ME
-    def __init__(self, Location=[0, 0, 0], EmissionMode="Directional Isotropic", EmissionDirection=[0, 0, 0], EmissionWavelengthType="Sun spectrum AG15g", StartingWavelength=450.0, StartingMaterial=None, RespectPolarization=True, StartingLocation = [0,0,0], ScaleFactor = 1.0):
 
+class Photon():
+    """
+    Photon class responsible for photon initialization, emission, absorption,
+    reflection, refraction, focusing, polarization, etc.
+    """
+    def __init__(
+        self,
+        Location=[0, 0, 0],
+        EmissionMode="Directional Isotropic",
+        EmissionDirection=[0, 0, 0],
+        EmissionWavelengthType="Sun spectrum AG15g",
+        StartingWavelength=450.0,
+        StartingMaterial=None,
+        RespectPolarization=True,
+        StartingLocation=[0, 0, 0],
+        ScaleFactor=1.0
+    ):
         self.Location = Location
         self.EmissionMode = EmissionMode
         self.EmissionDirection = EmissionDirection
@@ -18,6 +32,7 @@ class Photon():
         self.StartingLocation = StartingLocation
         self.ScaleFactor = ScaleFactor
 
+        # Defaults and placeholders
         self.PointCy = [0, 0, 0]
         self.OperationPlane = [[0, 0, 0], [0, 0, 0]]
         self.WasElement = False
@@ -32,286 +47,415 @@ class Photon():
         self.DistanceLeftToAbsorption = 0.0
         self.ElectricFieldVector = [1, 0, 0]
 
-        self.OldPoint = [0,0,0]
-
+        self.OldPoint = [0, 0, 0]
         self.LineColor = "black"
 
     def EmitSun(self):
-        '''Emits Photon from the Sun Spectrum'''
+        """
+        Emits a photon wavelength sampled from the AM1.5 solar spectrum.
+        The AM15.txt file should contain two columns: wavelength (nm), intensity.
+        """
         am15 = np.loadtxt("AM15.txt")
-        #This converts the W/m^2 spectrum to Photons/s spectrum (only proportional though,  normalized anyway)
-        #https://www.berthold.com/en/bio/how-do-i-convert-irradiance-photon-flux
+        # Convert W/m^2 to a photon flux-like weighting (proportional only).
+        # https://www.berthold.com/en/bio/how-do-i-convert-irradiance-photon-flux
         am15[:, 1] *= am15[:, 0]
         am15 = RTU.RectifySpectrum(am15)
         return np.random.choice(am15[:, 0], p=am15[:, 1])
 
-
-    def ResetPhoton(self,OperationPlane):
+    def ResetPhoton(self, OperationPlane):
+        """
+        Reset the photon before a new optical event or run.
+        """
         self.GeneratePhoton()
-        self.OperationPlane = cp.deepcopy(OperationPlane) ##[self.OpticalElements[0].SupportVector,self.OpticalElements[0].DirectionVector]
+        self.OperationPlane = cp.deepcopy(OperationPlane)
         self.StartingWavelength = cp.deepcopy(self.Wavelength)
         self.Reflected = False
 
-
     def FindSign(self):
-        '''Find the sign of the normal vector for reflection,  refraction etc'''
+        """
+        Determine the direction sign relative to the plane normal
+        (used in reflection/refraction).
+        """
         self.sgn = np.sign(-np.dot(self.Direction, self.OperationPlane[1]))
 
-
     def GeneratePhoton(self):
-        '''Generate a new Photon
-        [self.NumPhEdit.value(),  map(float, self.StartPhEdit.text().split(", ")),  self.EmDPhEdit.currentText(), self.WavelPhEdit.value(), self.StMatPhEdit.currentText()]'''
+        """
+        Generate a fresh photon based on the initial parameters like emission mode,
+        wavelength type, etc.
+        """
         self.WasElement = False
-        # self.Photon = [np.array([[-0.5, -0.5, -0.1], RTU.GenerateDirectionSine()]), 'Start', 450.0, "MaterialHere", 0, [1, 0, 0], 450.0]
         self.Location = cp.deepcopy(self.StartingLocation)
 
+        # Direction generation
         if self.EmissionMode == "Directional Isotropic":
             self.Direction = RTU.GenerateDirectionSine()
-            self.Direction[2] = np.absolute(self.Direction[2])
+            self.Direction[2] = abs(self.Direction[2])
             tm = np.roll(RTU.MakeVectAxis(self.EmissionDirection), 2, axis=1)
             self.Direction = np.dot(self.Direction, tm)
-
-            #Generate photons within rectangle
-            #2x2cm
-            #self.Location = [np.random.rand()*2 - 1.0,  np.random.rand()*2 - 1.0, self.Location[2]]
-            #Hexagon
-            #self.Location = [np.random.rand()*2 - 1.0, np.random.rand()*(2.0/11.0) - (1.0/11.0), self.Location[2]]
-            # self.Photon[0][0] = [np.random.rand()*5 - 2.5,  np.random.rand()*5 - 2.5, self.Photon[0][0][2]]
         elif self.EmissionMode == "Directional Strict":
             self.Direction = cp.deepcopy(self.EmissionDirection)
-            #Generate photons within rectangle
-            #self.Location = [np.random.rand()*2 - 1.0, np.random.rand()*(2.0/11.0) - (1.0/11.0), self.Location[2]]
-            #self.Location = [np.random.rand()*2 - 1.0, np.random.rand()*(2.0) - (1.0), self.Location[2]]
 
         self.Direction /= np.linalg.norm(self.Direction)
 
+        # Wavelength generation
         if self.EmissionWavelengthType == "Sun spectrum AG15g":
             self.Wavelength = self.EmitSun()
-
         else:
             self.Wavelength = cp.deepcopy(self.StartingWavelength)
 
-        print "Wavelength", self.Wavelength
+        print("Wavelength", self.Wavelength)
 
+        # Set current material and initialize polarization
         self.CurrentMaterial = cp.deepcopy(self.StartingMaterial)
         self.UpdatePolarizationRandom(self.Direction)
 
-
     def UpdatePolarizationMolOrientation(self, MolOrient, EmissionDirection):
-        '''Update the molecules electric field vector depending on the molecular orientation and the emission direction'''
+        """
+        Update the photon's electric field vector based on a given molecular
+        orientation and the emission direction.
+        """
         v1 = np.cross(MolOrient, EmissionDirection)
         v2 = np.cross(EmissionDirection, v1)
         v2 /= np.linalg.norm(v2)
         self.ElectricFieldVector = v2
 
     def UpdatePolarizationRandom(self, EmissionDirection):
-        '''Find a random vector perpendicular to the emission direction and set it as the new electric field vector'''
-        #Find random vector on sphere
+        """
+        Assign a random polarization vector perpendicular to the emission direction.
+        """
+        # Find a random unit vector
         v = np.random.randn(3)
         v /= np.linalg.norm(v)
-        #Cross product with  emission direction
+        # Cross product to ensure perpendicularity to EmissionDirection
         self.ElectricFieldVector = np.cross(EmissionDirection, v)
         self.ElectricFieldVector /= np.linalg.norm(self.ElectricFieldVector)
 
-
     def UpdatePolarization(self, OldDirection):
-        '''Update the Photon's polarization vector depending on the element'''
-        #Plot Stuff
-        # newpol = self.Photon[0][0] + 0.2*self.Photon[5]
-        # self.ax.plot([self.Photon[0][0][0], newpol[0]], [self.Photon[0][0][1], newpol[1]], [self.Photon[0][0][2], newpol[2]],  color = 'black')
-
+        """
+        Update the photon's polarization vector to account for changes in direction
+        after reflection, refraction, etc.
+        """
         newdir = self.Direction
-        CrossProduct = np.cross(newdir, OldDirection)
-        if np.linalg.norm(CrossProduct) != 0:
-            acsval = np.dot(newdir, OldDirection)/(np.linalg.norm(newdir)*np.linalg.norm(OldDirection))
-            if acsval <= 1.0 and acsval >= -1.0:
-                self.ElectricFieldVector = np.dot(RTU.RotationMatrix(CrossProduct, -np.arccos(acsval)), self.ElectricFieldVector)
+        cross_product = np.cross(newdir, OldDirection)
+        norm_cp = np.linalg.norm(cross_product)
+        if norm_cp != 0:
+            dot_val = np.dot(newdir, OldDirection) / (
+                np.linalg.norm(newdir) * np.linalg.norm(OldDirection)
+            )
+            # Ensure dot_val stays within [-1, 1]
+            if -1.0 <= dot_val <= 1.0:
+                rot_angle = -np.arccos(dot_val)
+                rot_matrix = RTU.RotationMatrix(cross_product, rot_angle)
+                self.ElectricFieldVector = np.dot(rot_matrix, self.ElectricFieldVector)
                 self.ElectricFieldVector /= np.linalg.norm(self.ElectricFieldVector)
 
-        #plot more stuff
-        # newpol = self.Photon[0][0] + 0.2*self.Photon[5]
-        # self.ax.plot([self.Photon[0][0][0], newpol[0]], [self.Photon[0][0][1], newpol[1]], [self.Photon[0][0][2], newpol[2]],  color = 'yellow')
-
     def PrepareExecution(self):
+        """
+        Prepare the photon for an operation on the current plane or element.
+        """
         self.FindSign()
         self.OldPoint = cp.deepcopy(self.Location)
         self.OldDirection = cp.deepcopy(self.Direction)
         self.LineColor = self.CurrentMaterial.color
 
     def PostProcessExecution(self):
+        """
+        Final updates after executing a reflection, refraction, or another operation.
+        """
         self.UpdatePolarization(self.OldDirection)
         self.WasElement = True
 
     def ReflectOnPlane(self):
-        '''Reflect the line IncidentRay on the Plane'''
+        """
+        Reflect the photon on its current operation plane (like a mirror reflection).
+        """
         try:
-
-            self.Location = (np.dot((self.OperationPlane[0]-self.Location), self.OperationPlane[1])/(np.dot(self.Direction, self.OperationPlane[1])))*self.Direction + self.Location
-            self.Direction = 2*np.dot(self.OperationPlane[1], self.Direction)*self.OperationPlane[1] - self.Direction
-
+            denom = np.dot(self.Direction, self.OperationPlane[1])
+            num = np.dot((self.OperationPlane[0] - self.Location), self.OperationPlane[1])
+            self.Location = (num / denom) * self.Direction + self.Location
+            self.Direction = 2 * np.dot(self.OperationPlane[1], self.Direction) * self.OperationPlane[1] - self.Direction
+        except ZeroDivisionError:
+            print("Ray and plane possibly do not intersect (ReflectOnPlane).")
+            raise
         except:
-            print "Ray and plane possibly do not intersect"
+            print("Unknown error in ReflectOnPlane.")
             raise
 
-
-
     def FocusThinLens(self, f):
-        '''Assume Plane as an ideal thin lens and refract the IncidentRay accordingly'''
+        """
+        Model an ideal thin lens at the plane (self.OperationPlane) with focal length f.
+        The photon is refracted as if passing through a thin lens, focusing to a point
+        on the focal plane.
+        """
         try:
-            #Intersection of parallel ray through the center of the lense and the focal plane
+            plane_den = np.dot(self.Direction, self.OperationPlane[1])
+            if plane_den == 0:
+                print("Ray is parallel to the lens plane; no intersection.")
+                return
 
-            BaseVect = (np.dot((self.OperationPlane[0]-self.Location), self.OperationPlane[1])/(np.dot(self.Direction, self.OperationPlane[1])))*self.Direction + self.Location
-            #Check which focal plane should be used since Ray should always cross the lens
-            FPlane1 = [self.OperationPlane[0] + f*self.OperationPlane[1], self.OperationPlane[1]]
-            FPlane2 = [self.OperationPlane[0] - f*self.OperationPlane[1], self.OperationPlane[1]]
-            #If FPlane1 and Photon are on the same side of the lens,  use FPlane2 to find intersection,  or other way around
-                   
-            if RTU.CheckSides(self.Location, FPlane1[0], self.OperationPlane) == True:
+            # Find intersection with lens plane
+            BaseVect = (
+                np.dot((self.OperationPlane[0] - self.Location), self.OperationPlane[1])
+                / plane_den
+            ) * self.Direction + self.Location
+
+            # Two possible focal planes: f in front or behind the lens
+            FPlane1 = [self.OperationPlane[0] + f * self.OperationPlane[1], self.OperationPlane[1]]
+            FPlane2 = [self.OperationPlane[0] - f * self.OperationPlane[1], self.OperationPlane[1]]
+
+            # Check sides to decide which focal plane to use
+            if RTU.CheckSides(self.Location, FPlane1[0], self.OperationPlane):
                 FPlane = FPlane2
             else:
                 FPlane = FPlane1
-                
-           
-            #This Does an actual lens
-            #ParallelRay = [self.OperationPlane[0], self.Direction]
-            #this does a thin "cylindrical" lens
-            ParallelRay = [[BaseVect[0],BaseVect[1],self.OperationPlane[0][2]], self.Direction]
-            
-            ImgP = (np.dot((FPlane[0]-ParallelRay[0]), FPlane[1])/(np.dot(ParallelRay[1], FPlane[1])))*ParallelRay[1] + ParallelRay[0]
-            # self.ax.plot([ParallelRay[0][0], ImgP[0]], [ParallelRay[0][1], ImgP[1]], [ParallelRay[0][2], ImgP[2]])
-            DirectionVector = -(ImgP-BaseVect)
 
+            # Project a "parallel" ray from BaseVect
+            ParallelRay = [[BaseVect[0], BaseVect[1], self.OperationPlane[0][2]], self.Direction]
+            denom_pr = np.dot(ParallelRay[1], FPlane[1])
+            if denom_pr == 0:
+                print("ParallelRay is parallel to focal plane; no intersection.")
+                return
+
+            # Intersection with the chosen focal plane
+            num_pr = np.dot((FPlane[0] - ParallelRay[0]), FPlane[1])
+            ImgP = (num_pr / denom_pr) * ParallelRay[1] + ParallelRay[0]
+
+            DirectionVector = -(ImgP - BaseVect)
             self.Location = BaseVect
-            #print "OLDDIRECTION",self.Direction
-            self.Direction = DirectionVector/np.linalg.norm(DirectionVector)
-            #print "NEWDIRECTION",self.Direction
+            self.Direction = DirectionVector / np.linalg.norm(DirectionVector)
 
-        except:
-            print "Ray and plane possibly do not intersect"
+        except ZeroDivisionError:
+            print("Ray and plane possibly do not intersect (FocusThinLens).")
             raise
-
-
+        except:
+            print("Unknown error in FocusThinLens.")
+            raise
 
     def RefractOnPlane(self, n1, n2):
-        '''Uses Snells law to refract the IncidentRay through the interface at Plane. The Refraction indices n1, n2 correspond to the media at each side of the interface '''
+        """
+        Use Snell's law to refract the photon through the interface plane
+        from material with refractive index n1 to material with refractive index n2.
+        """
         try:
-            self.Location = (np.dot((self.OperationPlane[0]-self.Location), self.OperationPlane[1])/(np.dot(self.Direction, self.OperationPlane[1])))*self.Direction + self.Location
-            self.Direction = (n1/n2)*self.Direction + ((n1/n2)*(-np.dot(self.Direction, self.OperationPlane[1])) - self.sgn*np.sqrt(1-((n1/n2)**2)*(1-(-np.dot(self.Direction, self.OperationPlane[1]))**2))) * self.OperationPlane[1]
+            denom = np.dot(self.Direction, self.OperationPlane[1])
+            if denom == 0:
+                print("Ray and plane possibly do not intersect (RefractOnPlane).")
+                return
+            num = np.dot((self.OperationPlane[0] - self.Location), self.OperationPlane[1])
+            self.Location = (num / denom) * self.Direction + self.Location
 
+            ratio = n1 / n2
+            dotval = -np.dot(self.Direction, self.OperationPlane[1])
+            under_sqrt = 1 - (ratio ** 2) * (1 - (dotval ** 2))
+            # Check for total internal reflection
+            if under_sqrt < 0:
+                print("Total internal reflection in RefractOnPlane.")
+                # If total internal reflection, reflect
+                self.ReflectOnPlane()
+            else:
+                self.Direction = ratio * self.Direction + (
+                    ratio * dotval - self.sgn * np.sqrt(under_sqrt)
+                ) * self.OperationPlane[1]
+
+        except ZeroDivisionError:
+            print("Ray and plane possibly do not intersect (RefractOnPlane) - ZeroDivisionError.")
+            raise
         except:
-            print "Ray and plane possibly do not intersect"
+            print("Unknown error in RefractOnPlane.")
             raise
 
-
     def CheckForAbsorption(self, OldPoint, SmallestDistance):
-        '''Check if current material should absorb parts of the photons,  if so,  it should end the Photon trajectory,  randomly'''
-
+        """
+        Check if the photon is absorbed by the current material over SmallestDistance.
+        If so, handle the absorption event, including potential FRET emission.
+        """
         self.OldPoint = OldPoint
-        # self.LineColor = "blue"
-
-        #Somwhere here possibly set oldpoint correlctly
 
         if self.CurrentMaterial.IsAbsorber:
             if self.DistanceLeftToAbsorption > SmallestDistance:
                 self.DistanceLeftToAbsorption -= SmallestDistance
                 self.Status = 'Start'
             else:
-                print "ABSORBED"
+                print("ABSORBED")
                 self.BeenAbsorbed[0] = True
                 self.WasElement = False
-                #If Photon is absorbed,  move along trajectory for rest of the way
-                self.OldPoint = cp.deepcopy(self.Location)
                 self.Status = 'Absorbed'
 
+                # Move photon location the remaining distance
                 restdirect_v = self.PointCy - self.Location
                 restdirect_v /= np.linalg.norm(restdirect_v)
-                newp = (restdirect_v)*self.DistanceLeftToAbsorption + self.Location
+                newp = restdirect_v * self.DistanceLeftToAbsorption + self.Location
 
-                # Parent.ax.plot([self.Location[0], newp[0]], [self.Photon.Location[1], newp[1]], [self.Photon.Location[2], newp[2]],  color ='blue')
                 self.Location = newp
 
-                #Calculate probabilities to find out if the photon was absorbed by donor or acceptor
-
-                b_d = self.CurrentMaterial.conc_b * 1e-3 *np.log(10)* self.CurrentMaterial.emax_D * np.maximum(1e-99, self.CurrentMaterial.sp_abs_D[RTU.FindClosestListElement(self.CurrentMaterial.sp_abs_D[:, 0], self.Wavelength), 1])
-                b_a = self.CurrentMaterial.conc_a * 1e-3 *np.log(10)* self.CurrentMaterial.emax_A * np.maximum(1e-99, self.CurrentMaterial.sp_abs_A[RTU.FindClosestListElement(self.CurrentMaterial.sp_abs_A[:, 0], self.Wavelength), 1])
+                # Probability distribution for donor vs. acceptor absorption
+                b_d = (
+                    self.CurrentMaterial.conc_b
+                    * 1e-3
+                    * np.log(10)
+                    * self.CurrentMaterial.emax_D
+                    * np.maximum(
+                        1e-99,
+                        self.CurrentMaterial.sp_abs_D[
+                            RTU.FindClosestListElement(
+                                self.CurrentMaterial.sp_abs_D[:, 0],
+                                self.Wavelength
+                            ),
+                            1
+                        ]
+                    )
+                )
+                b_a = (
+                    self.CurrentMaterial.conc_a
+                    * 1e-3
+                    * np.log(10)
+                    * self.CurrentMaterial.emax_A
+                    * np.maximum(
+                        1e-99,
+                        self.CurrentMaterial.sp_abs_A[
+                            RTU.FindClosestListElement(
+                                self.CurrentMaterial.sp_abs_A[:, 0],
+                                self.Wavelength
+                            ),
+                            1
+                        ]
+                    )
+                )
 
                 if self.CurrentMaterial.IsAligned:
-                    print "Overlap Integral", self.Psi
-                    #The 3 comes from the integration over space. For isotropic alignment the PSI integral is 1/3 but it has to be 1,  thus the 3.
-                    b_a *= self.Psi * 3
+                    print("Overlap Integral", self.Psi)
+                    b_a *= self.Psi * 3  # Factor of 3 for aligned absorption
 
-                #if Photon is absorbed by donor (here b) (Not sure if this is correct...)
-                if np.random.rand() < (b_d)/(b_d + b_a):
-                    #if photon is in donor
-                    print "absorbed by donor"
+                # Absorbed by donor or acceptor?
+                if np.random.rand() < (b_d / (b_d + b_a)):
+                    print("absorbed by donor")
                     fret = MCF.MCFRET(self, True, self.RespectPolarization)
                     self = fret.RunSimulation()
-                    #Reset free distance in absorber
                     self.LamBeerDistance()
                 else:
-                    #If absorbed by acceptor
-                    print "absorbed by acceptor"
-
+                    print("absorbed by acceptor")
                     fret = MCF.MCFRET(self, False, self.RespectPolarization)
                     self = fret.RunSimulation()
-                    #Reset free distance in absorber
+                    print(self.Wavelength)
                     self.LamBeerDistance()
-
-                    print self.Wavelength
 
         else:
             self.Status = 'Start'
             self.WasElement = True
 
-
     def LambertBeerFullIntegral(self, n_E):
-        '''Calculate the absorption integral for lambert beer and aligned dyes'''
-        x = n_E[0]
-        y = n_E[1]
-        z = n_E[2]
+        """
+        Calculate the absorption integral for Lambert-Beer with aligned dyes.
+        This is a direct numeric/symbolic expression. For extremely small AlignS,
+        fallback to cos^2 alignment if needed.
+        """
+        x, y, z = n_E
         if self.CurrentMaterial.AlignS > 1e-10:
-            ol = np.absolute(1/self.CurrentMaterial.AlignS * (np.exp(-0.5*self.CurrentMaterial.AlignS) * ((-0.2349964007466563j) * (x**2 + y**2 + (2/3.0)* z**2) * special.erf(2.221441469079183/self.CurrentMaterial.AlignS - (0.7071067811865475j) * self.CurrentMaterial.AlignS) + (0.2349964007466563j) * (x**2 + y**2 + (2/3.0) * z**2) * special.erf(2.221441469079183/self.CurrentMaterial.AlignS + (0.7071067811865475j)*self.CurrentMaterial.AlignS) + (0.4699928014933126 * x**2 + 0.4699928014933126 * y**2 + 0.313328534328875 * z**2) * special.erfi(0.7071067811865475 * self.CurrentMaterial.AlignS)) +    np.exp(-4.5 * self.CurrentMaterial.AlignS**2) * ((0.07833213358221876j) * (x**2 + y**2 - 2 * z**2) * special.erf(2.221441469079183/self.CurrentMaterial.AlignS - (2.1213203435596424j) * self.CurrentMaterial.AlignS) - (0.07833213358221876j) * (x**2 +  y**2 - 2* z**2)*special.erf(2.221441469079183/self.CurrentMaterial.AlignS + (2.1213203435596424j)*self.CurrentMaterial.AlignS) + (-0.15666426716443752*x**2 - 0.15666426716443752 * y**2 + 0.31332853432887503 * z**2) * special.erfi(2.1213203435596424 * self.CurrentMaterial.AlignS))))
+            ol = np.abs(
+                1
+                / self.CurrentMaterial.AlignS
+                * (
+                    np.exp(-0.5 * self.CurrentMaterial.AlignS)
+                    * (
+                        (-0.2349964007466563j)
+                        * (x ** 2 + y ** 2 + (2 / 3.0) * z ** 2)
+                        * special.erf(
+                            2.221441469079183 / self.CurrentMaterial.AlignS
+                            - (0.7071067811865475j) * self.CurrentMaterial.AlignS
+                        )
+                        + (0.2349964007466563j)
+                        * (x ** 2 + y ** 2 + (2 / 3.0) * z ** 2)
+                        * special.erf(
+                            2.221441469079183 / self.CurrentMaterial.AlignS
+                            + (0.7071067811865475j) * self.CurrentMaterial.AlignS
+                        )
+                        + (
+                            0.4699928014933126 * x ** 2
+                            + 0.4699928014933126 * y ** 2
+                            + 0.313328534328875 * z ** 2
+                        )
+                        * special.erfi(
+                            0.7071067811865475 * self.CurrentMaterial.AlignS
+                        )
+                    )
+                    + np.exp(-4.5 * self.CurrentMaterial.AlignS ** 2)
+                    * (
+                        (0.07833213358221876j)
+                        * (x ** 2 + y ** 2 - 2 * z ** 2)
+                        * special.erf(
+                            2.221441469079183 / self.CurrentMaterial.AlignS
+                            - (2.1213203435596424j) * self.CurrentMaterial.AlignS
+                        )
+                        - (0.07833213358221876j)
+                        * (x ** 2 + y ** 2 - 2 * z ** 2)
+                        * special.erf(
+                            2.221441469079183 / self.CurrentMaterial.AlignS
+                            + (2.1213203435596424j) * self.CurrentMaterial.AlignS
+                        )
+                        + (
+                            -0.15666426716443752 * x ** 2
+                            - 0.15666426716443752 * y ** 2
+                            + 0.31332853432887503 * z ** 2
+                        )
+                        * special.erfi(
+                            2.1213203435596424 * self.CurrentMaterial.AlignS
+                        )
+                    )
+                )
+            )
         else:
-            print "Fastlane", n_E
-            ol = np.dot(n_E,[0,0,1])**2
+            # For extremely small alignment, approximate with cos^2
+            print("Fastlane", n_E)
+            ol = (np.dot(n_E, [0, 0, 1])) ** 2
 
-        if ol < 1e-10:
-            return 0.0
-        else:
-            return ol
+        return 0.0 if ol < 1e-10 else ol
 
     def LamBeerDistance(self):
-        '''Randomly (exponential distribution) assign a length to the photon that it can go within the medium,  only executed when an interface is crossed'''
-        #print self.CurrentMaterial.conc_a ,  self.CurrentMaterial.emax_A,  self.CurrentMaterial.conc_b ,  self.CurrentMaterial.emax_D #CHANGED
+        """
+        Randomly assign the photon's free path length in an absorbing medium,
+        according to an exponential distribution. Called when crossing a new medium.
+        """
         if self.CurrentMaterial.IsAbsorber:
+            idx_absA = RTU.FindClosestListElement(
+                self.CurrentMaterial.sp_abs_A[:, 0], self.Wavelength
+            )
+            b_a = (
+                self.CurrentMaterial.conc_a
+                * 1e-3
+                * self.CurrentMaterial.emax_A
+                * np.log(10)
+                * np.maximum(1e-99, self.CurrentMaterial.sp_abs_A[idx_absA, 1])
+            )
 
-            b_a = self.CurrentMaterial.conc_a * 1e-3 * self.CurrentMaterial.emax_A * np.log(10) * np.maximum(1e-99, self.CurrentMaterial.sp_abs_A[RTU.FindClosestListElement(self.CurrentMaterial.sp_abs_A[:, 0], self.Wavelength), 1]) #convert concentration so free length is in cm
-            b_d = self.CurrentMaterial.conc_b * 1e-3 * self.CurrentMaterial.emax_D * np.log(10) * np.maximum(1e-99, self.CurrentMaterial.sp_abs_D[RTU.FindClosestListElement(self.CurrentMaterial.sp_abs_D[:, 0], self.Wavelength), 1])
+            idx_absD = RTU.FindClosestListElement(
+                self.CurrentMaterial.sp_abs_D[:, 0], self.Wavelength
+            )
+            b_d = (
+                self.CurrentMaterial.conc_b
+                * 1e-3
+                * self.CurrentMaterial.emax_D
+                * np.log(10)
+                * np.maximum(1e-99, self.CurrentMaterial.sp_abs_D[idx_absD, 1])
+            )
 
             if self.CurrentMaterial.IsAligned:
-                #Numerical Integrator has problems if distribution is too small so the vectors are rotated on the alignment vectors
-                #The theta angle can be used to tell the integrator where to look
-                #So the align vector is counted as the z-vector [0, 0, 1] and the n_E vector is transformed accordingly
                 tm = np.roll(RTU.MakeVectAxis(self.CurrentMaterial.AlignVect), 2, axis=1)
                 n_E = np.dot(self.ElectricFieldVector, tm)
                 n_E /= np.linalg.norm(n_E)
-                #Using analytic expression
                 self.Psi = self.LambertBeerFullIntegral(n_E)
-                print "Overlap Integral", self.Psi
-                #The 3 comes from the integration over space. For isotropic alignment the PSI integral is 1/3 but it has to be 1,  thus the 3.
+                print("Overlap Integral", self.Psi)
                 b_a *= self.Psi * 3.0
-            self.DistanceLeftToAbsorption = (1/self.ScaleFactor) * np.random.exponential(scale=1.0/(b_a + b_d))
+
+            total_abs_coeff = b_a + b_d
+            if total_abs_coeff == 0:
+                scale_val = 1e12  # effectively infinite
+            else:
+                scale_val = 1.0 / total_abs_coeff
+
+            self.DistanceLeftToAbsorption = (1 / self.ScaleFactor) * np.random.exponential(
+                scale=scale_val
+            )
         else:
             self.DistanceLeftToAbsorption = 0.0
-        #print "NEW FREE LENGTH", self.DistanceLeftToAbsorption #CHANGED
 
-
-
-
-
-
-
-
-
-
-##
+        print("NEW FREE LENGTH", self.DistanceLeftToAbsorption)
